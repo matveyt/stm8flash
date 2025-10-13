@@ -26,8 +26,8 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <termios.h>
 #include <unistd.h>
+#include "ucomm.h"
 
 static espstlink_error_t error = {0, NULL};
 
@@ -56,39 +56,13 @@ static void set_error(int code, char *format, ...) {
 }
 
 espstlink_t *espstlink_open(const char *device) {
-  struct termios tty;
-  memset(&tty, 0, sizeof tty);
-
-  int fd = open(device == NULL ? "/dev/ttyUSB0" : device, O_RDWR | O_NOCTTY);
+  intptr_t fd = ucomm_open(device, 115200, 0);
   if (fd < 0) {
     perror("Couldn't open tty");
     return NULL;
   }
+  ucomm_timeout(fd, 100);
 
-  /* Error Handling */
-  if (tcgetattr(fd, &tty) != 0) {
-    perror("Couldn't open tty");
-    return NULL;
-  }
-
-  /* Set Baud Rate */
-  cfsetospeed(&tty, (speed_t)B115200);
-  cfsetispeed(&tty, (speed_t)B115200);
-
-  /* Setting other Port Stuff */
-  tty.c_cc[VMIN] = 0;             // read does block
-  tty.c_cc[VTIME] = 1;            // 0.1 seconds read timeout
-  tty.c_cflag |= CREAD | CLOCAL;  // turn on READ & ignore ctrl lines
-
-  /* Make raw */
-  cfmakeraw(&tty);
-
-  /* Flush Port, then applies attributes */
-  tcflush(fd, TCIFLUSH);
-  if (tcsetattr(fd, TCSANOW, &tty) != 0) {
-    perror("Setting tty attributes failed");
-    return NULL;
-  }
   espstlink_t *pgm = malloc(sizeof(espstlink_t));
   pgm->fd = fd;
   return pgm;
@@ -132,10 +106,10 @@ static const char *swim_error_name(int code) {
   }
 }
 
-static bool error_check(int fd, uint8_t command, uint8_t *resp_buf,
+static bool error_check(intptr_t fd, uint8_t command, uint8_t *resp_buf,
                         size_t size) {
   uint8_t buf[4];
-  int len = read(fd, buf, 1);
+  int len = ucomm_read(fd, buf, 1);
   if (len < 1) {
     set_error(ESPSTLINK_ERROR_READ,
               "Didn't get a response from the device: %s\n", strerror(errno));
@@ -144,10 +118,10 @@ static bool error_check(int fd, uint8_t command, uint8_t *resp_buf,
   if (buf[0] != command) {
     set_error(ESPSTLINK_ERROR_DATA, "Unexpected data: %02x\n", buf[0]);
     error.data[0] = buf[0];
-    error.data_len = 1 + read(fd, &error.data[1], sizeof(error.data) - 1);
+    error.data_len = 1 + ucomm_read(fd, &error.data[1], sizeof(error.data) - 1);
     return 0;
   }
-  len = read(fd, buf + 1, 1);
+  len = ucomm_read(fd, buf + 1, 1);
   if (len < 1) {
     set_error(ESPSTLINK_ERROR_DATA,
               "Device didn't finish command 0x%02x (%s): %s\n", buf[0],
@@ -158,7 +132,7 @@ static bool error_check(int fd, uint8_t command, uint8_t *resp_buf,
     if (resp_buf && size) {
       size_t total = 0;
       while (total < size) {
-        len = read(fd, resp_buf + total, size);
+        len = ucomm_read(fd, resp_buf + total, size);
         if (len < 1) {
           set_error(
               ESPSTLINK_ERROR_DATA,
@@ -173,7 +147,7 @@ static bool error_check(int fd, uint8_t command, uint8_t *resp_buf,
     return 1;
   }
   if (buf[1] == 0xFF) {
-    len = read(fd, buf + 2, 2);
+    len = ucomm_read(fd, buf + 2, 2);
     if (len < 2) {
       set_error(ESPSTLINK_ERROR_DATA,
                 "Device didn't finish sending error code for command 0x%02x "
@@ -192,7 +166,7 @@ static bool error_check(int fd, uint8_t command, uint8_t *resp_buf,
               command_name(buf[0]), buf[1]);
     error.data[0] = buf[0];
     error.data[1] = buf[1];
-    error.data_len = 2 + read(fd, &error.data[2], sizeof(error.data) - 2);
+    error.data_len = 2 + ucomm_read(fd, &error.data[2], sizeof(error.data) - 2);
   }
   return 0;
 }
@@ -201,7 +175,7 @@ bool espstlink_fetch_version(espstlink_t *pgm) {
   uint8_t cmd[] = {0xFF};
   uint8_t resp_buf[2];
 
-  write(pgm->fd, cmd, 1);
+  ucomm_write(pgm->fd, cmd, 1);
   if (!error_check(pgm->fd, cmd[0], resp_buf, 2)) return 0;
 
   int version = resp_buf[0] << 8 | resp_buf[1];
@@ -219,7 +193,7 @@ bool espstlink_swim_entry(const espstlink_t *pgm) {
   uint8_t cmd[] = {0xFE};
   uint8_t resp_buf[2];
 
-  write(pgm->fd, cmd, 1);
+  ucomm_write(pgm->fd, cmd, 1);
   if (!error_check(pgm->fd, cmd[0], resp_buf, 2)) return 0;
 
   int duration = resp_buf[0] << 8 | resp_buf[1];
@@ -234,14 +208,14 @@ bool espstlink_swim_entry(const espstlink_t *pgm) {
 bool espstlink_reset(const espstlink_t *pgm, bool input, bool enable_reset) {
   uint8_t cmd[] = {0xFD, input ? 0xFF : enable_reset};
 
-  write(pgm->fd, cmd, 2);
+  ucomm_write(pgm->fd, cmd, 2);
   return error_check(pgm->fd, cmd[0], NULL, 0);
 }
 
 bool espstlink_swim_srst(const espstlink_t *pgm) {
   uint8_t cmd[] = {0};
 
-  write(pgm->fd, cmd, 1);
+  ucomm_write(pgm->fd, cmd, 1);
   return error_check(pgm->fd, cmd[0], NULL, 0);
 }
 
@@ -249,7 +223,7 @@ bool espstlink_swim_read(const espstlink_t *pgm, uint8_t *buffer,
                          unsigned int addr, size_t size) {
   uint8_t cmd[] = {1, size, addr >> 16, addr >> 8, addr};
   uint8_t resp_buf[512];
-  write(pgm->fd, cmd, 5);
+  ucomm_write(pgm->fd, cmd, 5);
   if (!error_check(pgm->fd, cmd[0], resp_buf, cmd[1] + 4)) return 0;
   // there's 4 non data bytes in the response: len, 3*address
   memcpy(buffer, resp_buf + 4, size);
@@ -259,14 +233,14 @@ bool espstlink_swim_read(const espstlink_t *pgm, uint8_t *buffer,
 bool espstlink_swim_write(const espstlink_t *pgm, const uint8_t *buffer,
                           unsigned int addr, size_t size) {
   uint8_t cmd[] = {2, size, addr >> 16, addr >> 8, addr};
-  write(pgm->fd, cmd, 5);
-  write(pgm->fd, buffer, cmd[1]);
+  ucomm_write(pgm->fd, cmd, 5);
+  ucomm_write(pgm->fd, buffer, cmd[1]);
 
   uint8_t resp_buf[4];
   return error_check(pgm->fd, cmd[0], resp_buf, 4);
 }
 
 void espstlink_close(espstlink_t *pgm) {
-  close(pgm->fd);
+  ucomm_close(pgm->fd);
   free(pgm);
 }

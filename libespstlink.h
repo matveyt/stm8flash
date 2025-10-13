@@ -10,7 +10,7 @@
 #include <stdint.h>
 
 typedef struct _espstlink_t {
-  int fd;
+  intptr_t fd;
   int version;
 } espstlink_t;
 
